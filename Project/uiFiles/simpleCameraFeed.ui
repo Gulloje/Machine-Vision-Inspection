@@ -11,7 +11,7 @@
    </rect>
   </property>
   <property name="windowTitle">
-   <string>MainWindow</string>
+   <string>Machine Vision Inspection</string>
   </property>
   <widget class="QWidget" name="centralwidget">
    <widget class="QLabel" name="camFeedOne">
@@ -69,6 +69,9 @@
       <height>111</height>
      </rect>
     </property>
+    <property name="editTriggers">
+     <set>QAbstractItemView::NoEditTriggers</set>
+    </property>
    </widget>
    <widget class="QPushButton" name="btnSetPart">
     <property name="geometry">
@@ -87,7 +90,7 @@
     <property name="geometry">
      <rect>
       <x>10</x>
-      <y>720</y>
+      <y>700</y>
       <width>121</width>
       <height>31</height>
      </rect>
@@ -139,6 +142,9 @@
       <height>321</height>
      </rect>
     </property>
+    <property name="editTriggers">
+     <set>QAbstractItemView::NoEditTriggers</set>
+    </property>
    </widget>
    <widget class="QPushButton" name="btnAddDimension">
     <property name="geometry">
@@ -157,26 +163,13 @@
     <property name="geometry">
      <rect>
       <x>10</x>
-      <y>690</y>
+      <y>660</y>
       <width>121</width>
       <height>31</height>
      </rect>
     </property>
     <property name="text">
      <string>Delete Dimension</string>
-    </property>
-   </widget>
-   <widget class="QPushButton" name="btnDeleteDimension_2">
-    <property name="geometry">
-     <rect>
-      <x>10</x>
-      <y>650</y>
-      <width>121</width>
-      <height>31</height>
-     </rect>
-    </property>
-    <property name="text">
-     <string>Edit Dimension</string>
     </property>
    </widget>
    <widget class="QRadioButton" name="radioSetDimensionMode">

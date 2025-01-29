@@ -4,12 +4,13 @@ import cv2
 import pyrealsense2 as rs
 import numpy as np
 from PyQt6 import QtCore, QtGui, QtWidgets
+from SelectContourUI import *
 import math
 from masking import *
 from measurementFunctions import *
 
 
-class CameraThread(QtCore.QThread):
+class CameraThread2(QtCore.QThread):
     frameCaptured = QtCore.pyqtSignal(np.ndarray)  # signals to the ui to show a frame
     distanceCaptured = QtCore.pyqtSignal(str)
 
@@ -19,7 +20,6 @@ class CameraThread(QtCore.QThread):
         # self.pipeline.start(self.getConfigForPipeline())
         self.running = True
         self.isLiveMeasureOn = False
-        self.savedContourLengths = []
 
         alignment = rs.stream.color
         self.align = rs.align(alignment)
@@ -30,14 +30,33 @@ class CameraThread(QtCore.QThread):
         self.temporalFilter = rs.temporal_filter()
 
         self.depthFrame = None
-        self.colorImage = None
+        self.croppedColorImage = None
         self.colorFrame = None
         self.wholeImage = None
+        self.stillImage = None
+        self.cleanImage = None
+        self.imageForDeletion = None
 
         # for testing
         # helper for testing with mouse click
         self.point = (400, 300)
         self.boundingBox = [None, None, None, None]
+
+        self.frameBufferCount = 0  # Counter for frames
+        self.previousFrame = None  # To store the previous frame for movement detection
+        self.movementThreshold = 50  # Threshold for detecting significant movement
+        self.savedContourLengths = []
+        self.currentContour = None
+
+        self.frameEmitted = False
+        self.setDimensionIsOn = False
+        self.partDescriptor = []
+
+        #these are updated when setting dimensions in main.py, unsure if need to update anywhere else
+        self.measurementBuffers = {dimension.name: [] for dimension in self.partDescriptor}  # dict of separate lists for each dimension
+        self.averageMeasurements = {dimension.name: None for dimension in self.partDescriptor}
+
+
 
     def getConfigForPipeline(self):
         config = rs.config()
@@ -49,13 +68,13 @@ class CameraThread(QtCore.QThread):
         """Method to enable or disable live measurement."""
         self.isLiveMeasureOn = flag
 
-    def run(self):
 
+    def run(self):
         try:
             self.running = True
             self.pipeline.start(self.getConfigForPipeline())
 
-            while True:
+            while self.running:
                 frames = self.pipeline.wait_for_frames()
 
                 alignedFrames = self.align.process(frames)
@@ -65,89 +84,62 @@ class CameraThread(QtCore.QThread):
                 filteredDepthFrame = self.spatialFilter.process(depthFrame)
                 filteredDepthFrame = self.temporalFilter.process(filteredDepthFrame)
                 if not depthFrame or not colorFrame or not filteredDepthFrame:
-                    print('not getting frame')
+                    print('Not getting frame')
                     continue
 
                 self.intrinsics = colorFrame.profile.as_video_stream_profile().intrinsics
 
-                depthImage = np.asanyarray(filteredDepthFrame.get_data())
+
                 self.depthFrame = depthFrame
                 self.colorFrame = colorFrame
                 colorImage = np.asanyarray(colorFrame.get_data())
-                self.wholeImage = colorImage
+                self.wholeImage = colorImage  # Full original image
 
                 cropped = colorImage[self.boundingBox[1]:self.boundingBox[3], self.boundingBox[0]:self.boundingBox[2]]
-                self.colorImage = cropped
+                self.croppedColorImage = cropped  # Cropped image for measurement
 
-                cv2.circle(colorImage, self.point, 4, (0, 255, 0), -1)
-                distance = depthImage[self.point[1], self.point[0]]
-                if distance == 0:
-                    pass
+                # Check if live measurement is enabled
                 if self.isLiveMeasureOn:
-                    height, width = self.wholeImage.shape[:2]  # Get the dimensions of the image
+                    self.liveMeasure(colorImage)  # Perform live measurement and display results
+                    # emits the image in the calcLength function
+                elif self.setDimensionIsOn:
+                    if self.stillImage is None:
+                        self.stillImage = colorImage
 
-                    # Crop the image: 50 pixels from the left, and 20 pixels from the right
-                    cropped_image = self.wholeImage[:, 290:width - 90]
-                    # Convert the current frame to grayscale
-                    gray = cv2.cvtColor(cropped_image, cv2.COLOR_BGR2GRAY)
+                        #take outside of if statement if want a live feed
+                        self.cleanImage = self.stillImage.copy()
+                        self.imageForDeletion = self.stillImage.copy()
+                    self.emitTheRectangle(self.stillImage)
 
-                    blur = cv2.medianBlur(gray, 11)
-                    thresh = cv2.threshold(blur, 25, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-                    opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
-                    cv2.imshow("Grayscale Live Feed", opening)
+                else:
+                    self.frameEmitted = False
+                    # If live measurement is not enabled, just display the active camera feed
+                    if self.boundingBox[3] is not None:
+                        cv2.rectangle(colorImage,
+                                      (int(self.boundingBox[0]), int(self.boundingBox[1])),
+                                      (int(self.boundingBox[2]), int(self.boundingBox[3])),
+                                      (0, 255, 0), 2)
 
-                    # Find contours in the processed image
-                    contours, _ = cv2.findContours(opening, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+                    self.frameCaptured.emit(colorImage)
 
-                    # Iterate over each contour detected in the current frame
-                    for i, contour in enumerate(contours):
-                        # Calculate the length of the current contour
-                        contour_length = cv2.contourArea(contour, False)
-
-                        # Check if this contour is close in size to any of the saved contours
-                        for saved_length in self.savedContourLengths:
-                            length_ratio = contour_length / saved_length
-
-                            # If the length is similar (within 10%), draw a bounding box
-                            if 0.9 < length_ratio < 1.1:  # 10 % threshhold
-                                box = self.drawBoundingBox(self.wholeImage, contour)
-                                cv2.drawContours(self.wholeImage, [box], 0, (0, 255, 0), 2)
-                                length = self.calcDistance(box, 0, 1, i)
-                                width = self.calcDistance(box, 1, 2, i)
-                                drawMeasurements(self.wholeImage, box, length, width)
-
-                if self.boundingBox[3] is not None:
-                    cv2.rectangle(self.wholeImage,
-                                  (int(self.boundingBox[0]), int(self.boundingBox[1])),
-                                  (int(self.boundingBox[2]), int(self.boundingBox[3])),
-                                  (0, 255, 0), 2)
-                cv2.waitKey(1)
-
-                self.frameCaptured.emit(self.wholeImage)
 
         except Exception as e:
             print(e)
             traceback.print_exc()
 
-    def drawBoundingBox(self, image, contour):
-        # Get bounding box coordinates for the current contour
-
-        (x1, y1), (w1, h1), rotation = cv2.minAreaRect(contour)
-        box = cv2.boxPoints(((x1 + 2, y1 + 2), (w1, h1), rotation))
-        box = np.intp(box)
-        box[:, 0] += 290  # Since the image is cropped from the left, add the offset
-
-        # cv2.drawContours(image, [box], 0, (0, 0, 255), 2)
-        # Optionally, show the original full image with the corrected bounding box
-        cv2.imshow("Original Image with Bounding Box", image)
-        return box
-
     def updateClickPosition(self, point):
         self.point = point
 
+    def emitTheRectangle(self, img):
+        img = img.copy()
+        if self.boundingBox[3] is not None:
+            cv2.rectangle(img, (int(self.boundingBox[0]), int(self.boundingBox[1])),
+                          (int(self.boundingBox[2]), int(self.boundingBox[3])), (0, 255, 0), 2)
+        self.frameCaptured.emit(img)
+
+
     def getColorAndDepthImage(self):
-        return self.colorImage, self.depthFrame
+        return self.croppedColorImage, self.depthFrame
 
     def updateBoxPosition(self, boundingBox):
         self.boundingBox = boundingBox
@@ -158,66 +150,141 @@ class CameraThread(QtCore.QThread):
         self.wait()  # Wait for the thread to finish
         self.pipeline.stop()
 
-    def calcLength(self, contours):
-        imcopy = self.wholeImage.copy()
-        for i, contour in enumerate(contours, start=1):
-            offsetBox = self.getOffsetBoundingBox(contour)
-            # print(offsetBox)
-            length = self.calcDistance(offsetBox, 0, 1, i)
-            width = self.calcDistance(offsetBox, 1, 2, i)
-            print(f"{i}. Length: {length:.2f} mm")
-            print(f"Width: {width:.2f} mm")
+    def liveMeasure(self, colorImage):
+        image, opening, contours = processLiveFeed(colorImage)
+        #cv2.imshow('Filtered', opening)
+        #cv2.waitKey(1)
+        if contours and compareContours(self.currentContour, max(contours, key=cv2.contourArea)) < .05:
+            self.frameBufferCount += 1
+            textYOffset = 0
+            for contour in contours:
+                contourLen = cv2.arcLength(contour, True)
+                contourArea = cv2.contourArea(contour)
+                for dimension in self.partDescriptor:
+                    tolerance = 0.08
+                    if contourLen < 75 or dimension.type == "Radius":
+                        tolerance = 0.15
+                    lenLower = dimension.contourArcLen * (1 - tolerance)
+                    lenUpper = dimension.contourArcLen * (1 + tolerance)
+                    areaLower = dimension.contourArea * (1 - tolerance)
+                    areaUpper = dimension.contourArea * (1 + tolerance)
 
-            # get midpoints in pixel length for printing on the picture
-            # drawMeasurements(imcopy, offsetBox, length, width)
+                    if (lenLower <= contourLen <= lenUpper) and (areaLower <= contourArea <= areaUpper):
 
-        cv2.drawContours(imcopy, [offsetBox], 0, (0, 0, 255), 2)
-        cv2.circle(imcopy, tuple(offsetBox[0]), 3, (255, 0, 0), 2)  # min x blu
-        cv2.circle(imcopy, tuple(offsetBox[1]), 3, (0, 255, 0), 2)  # min y green
-        cv2.circle(imcopy, tuple(offsetBox[2]), 3, (0, 0, 255), 2)  # max x red
-        cv2.circle(imcopy, tuple(offsetBox[3]), 3, (255, 255, 255), 2)  # max y white
-        # cv2.imshow("Image", imcopy)   #IMPORTANT FOR DEBUGGING
+                        point1, point2 = drawCorrespondingDimension(dimension, self.wholeImage, contour, 290, 0)
+                        measurement = self.measureDistBetweenTwoPoint(point1, point2)
+                        if  dimension.type == 'Diameter' and measurement != 0:
+                            #print('getting added')
+                            measurement += .020
+                        if dimension.type == "Diameter": #draw a line through a diameter
+                            cv2.line(self.wholeImage, point1,  point2, (0, 255, 0), 2)
 
-    def getOffsetBoundingBox(self, contour):
-        # this will help when trying to rotate the rectangle
-        (x1, y1), (w1, h1), rotation = cv2.minAreaRect(contour)
-        box = cv2.boxPoints(((x1 + 2, y1 + 2), (w1, h1),
-                             rotation))  # i have the + 2 because of cropping the image when finding the contours, makes align better i think
-        box = np.intp(box)
-        offsetBox = np.array([[pt[0] + self.boundingBox[0], pt[1] + self.boundingBox[1]] for pt in box],
-                             dtype=np.int32)
-        return offsetBox
+                        if .0021 < measurement <= 300:  # Valid measurement
+                            self.measurementBuffers[dimension.name].append(measurement)
 
-    def calcDistance(self, offsetBox, point1Index, point2Index, contourIndex):
-        point1, point2 = offsetBox[point1Index], offsetBox[point2Index]
-        # print(point1, point2)
+                        # Check if buffer for the current dimension has reached 30 frames
+                        if len(self.measurementBuffers[dimension.name]) == 30:
+                            avg_measurement = sum(self.measurementBuffers[dimension.name]) / len(self.measurementBuffers[dimension.name])
+                            print(f"Average Measurement for {dimension.name} over 30 frames: ", avg_measurement)
+                            self.averageMeasurements[dimension.name] = avg_measurement  # Store averaged measurement for display
+                            self.measurementBuffers[dimension.name] = []  # Reset buffer after averaging
+
+                        # Display averaged measurement if calculated else display live measurement
+                        if self.averageMeasurements[dimension.name] is not None:
+                            displayMeasurements(self.wholeImage, self.averageMeasurements[dimension.name],
+                                                dimension,
+                                                textYOffset)
+                        else:
+                            displayMeasurements(self.wholeImage, measurement, dimension, textYOffset)
+
+                        textYOffset += 30
+
+
+        self.frameCaptured.emit(self.wholeImage)
+
+
+
+    def measureDistBetweenTwoPoint(self, point1, point2):
+        point1 = (int(point1[0]), int(point1[1]))
+        point2 = (int(point2[0]), int(point2[1]))
 
         h = self.depthFrame.get_height()
         w = self.depthFrame.get_width()
         udist, vdist = 0, 0
-        # Check if point1 is within valid bounds
         if 0 <= point1[0] < w and 0 <= point1[1] < h:
             udist = self.depthFrame.get_distance(point1[0], point1[1])  # gets the depth data at the pixel point
+            #print(point1[0], point1[1], ": ", udist)
         if 0 <= point2[0] < w and 0 <= point2[1] < h:
             vdist = self.depthFrame.get_distance(point2[0], point2[1])
-
+            #print(point2[0], point2[1], ": ", vdist)
         if udist == 0 or vdist == 0:  # should check that the addition is within the frame
-            print(f"Contour {contourIndex}: Depth data missing for some corners")
-            # point1[1] += 50
-            # point2[1] += 50
-            # udist = self.depthFrame.get_distance(point1[0], point1[1])
-            # vdist = self.depthFrame.get_distance(point2[0], point2[1])
+            print(f" Depth data missing for udist")
+            udist = .317
+        if vdist ==0:
+            print(f" Depth data missing for vdist")
+            vdist = .317
 
-        # Deproject the points to 3D space
+
         point1_3d = rs.rs2_deproject_pixel_to_point(self.intrinsics, [point1[0], point1[1]], udist)
         point2_3d = rs.rs2_deproject_pixel_to_point(self.intrinsics, [point2[0], point2[1]], vdist)
-        # print(point1_3d, point2_3d)
-
         distMeters = math.sqrt(
             math.pow(point1_3d[0] - point2_3d[0], 2)
             + math.pow(point1_3d[1] - point2_3d[1], 2)
             + math.pow(point1_3d[2] - point2_3d[2], 2))
 
         distMM = distMeters * 1000
+        distIn = distMM / 25.4
 
-        return distMM
+        return distIn
+
+
+    def detectMovement(self, previous_frame, current_frame):
+        frameDifference = cv2.absdiff(previous_frame, current_frame)
+
+        threshold = 25
+        _, thresh = cv2.threshold(frameDifference, threshold, 255, cv2.THRESH_BINARY)
+
+        # Find contours of moving objects
+        contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Check if motion is detected
+        motion_detected = False
+        for contour in contours:
+            if cv2.contourArea(contour) > 500:  # Adjust this threshold for sensitivity
+                motion_detected = True
+                break
+
+        return motion_detected
+
+
+
+    #crops by where the bounding box is
+    def cropImageByBoundingBox(self, image):
+        cropped = image[self.boundingBox[1]:self.boundingBox[3], self.boundingBox[0]:self.boundingBox[2]]
+        return cropped
+
+    def setDimension(self, dimension):
+        img = self.cropImageByBoundingBox(self.imageForDeletion.copy())
+        img, opening, contours = processLiveFeed(img)
+        handler = ContourHandler(img, contours, dimension.type.lower())
+        cv2.namedWindow("Choose " + dimension.type)
+        handler.set_mouse_callback("Choose " + dimension.type)
+        handler.wait_for_key("Choose " + dimension.type)
+
+        if (handler.selected_contour is not None):
+            dimension.contourArcLen = cv2.arcLength(handler.selected_contour, True)
+            dimension.contourArea = cv2.contourArea(handler.selected_contour)
+        if dimension.type == "Diameter":
+            drawCircleFromMinRect(self.stillImage, handler.selected_contour, self.boundingBox[0], self.boundingBox[1])
+        elif dimension.type == "Radius":
+            partialContour = handler.get_contour_segment_between_points()
+            dimension.refRadius, dimension.circleParams = findBestFitCircle(self.stillImage, partialContour, self.boundingBox[0], self.boundingBox[1])
+
+        else:
+            pt1, pt2 = drawMinAreaRect(self.stillImage, handler.selected_contour, self.boundingBox[0], self.boundingBox[1], dimension.type)
+            if dimension.type == "Height":
+                dimension.heightRefLen = math.dist(pt1, pt2)
+            else:
+                dimension.widthRefLen = math.dist(pt1, pt2)
+
+

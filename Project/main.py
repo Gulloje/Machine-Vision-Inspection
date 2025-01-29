@@ -5,8 +5,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QListWidgetItem
 
 from DimensionDescriptor import DimensionDescriptor
-from cameraThread import CameraThread
-from cameraThread2 import CameraThread2
+from cameraThread import CameraThread2
 from cameraFeedUi import Ui_MainWindow
 from popUpDialog import *
 from masking import *
@@ -46,6 +45,9 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         #add dimension button
         self.btnAddDimension.clicked.connect(self.addDimension)
+
+        #delete
+        self.btnDeleteDimension.clicked.connect(self.deleteDimension)
 
         #dropdown
         self.drpPartSelect.addItem("Part 1")
@@ -113,23 +115,12 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             if selectedIndex.isValid():
                 selectedItem = self.listModel.data(selectedIndex)
                 print(selectedItem)
-            if selectedItem == "Height + Width":
-                print('do a length')
-                self.camera.setLengthAndWidth()
-                self.createPopup("Width")
-            elif selectedItem == "Diameter":
-                print("bruh do a Diameter")
-                self.camera.setDiameter()
-            elif selectedItem == "Chamfer":
-                print("bruh do a Chamfer")
-            elif selectedItem == "Angle":
-                print("bruh do a Angle")
-            elif selectedItem == "Radius":
-                print("bruh do a Radius")
-            else:
-                print("bruh select Something")
+                dimension = DimensionDescriptor(selectedItem)
+                self.camera.setDimension(dimension)
+                print("Do a " + selectedItem)
+                self.createPopup(dimension)
 
-            self.createPopup(selectedItem)
+
 
         except Exception as e:
             print(e)
@@ -152,6 +143,7 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
             self.camera.setDimensionIsOn = True
         else:
             print('set dimension toggled off')
+
             self.camera.setDimensionIsOn = False
 
     def dropDownHandler(self, index):
@@ -177,9 +169,21 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
 
     def populateDimensions(self):
-        dimensions = ['Height + Width', 'Chamfer', 'Radius', 'Angle', 'Diameter']
+        dimensions = ['Height', 'Width', 'Radius', 'Diameter']
         self.listModel.setStringList(dimensions)
 
+    def deleteDimension(self):
+        selected = self.listPartDimensions.selectedIndexes()
+        if selected:
+            print(selected[0].data())
+            partNameToDelete = str(selected[0].data()).split(":")[0].strip()
+            print(partNameToDelete)
+            self.model.removeRow(selected[0].row()) #deletes from list view
+            for dimension in self.partDescriptor: #delete from the saved part
+                if dimension.name == partNameToDelete:
+                    self.partDescriptor.remove(dimension)
+                    self.camera.stillImage = redrawContours(self.camera.imageForDeletion.copy(), dimension.contourArcLen,self.partDescriptor)
+            print(self.partDescriptor)
 
 
     def closeEvent(self, event):
@@ -192,23 +196,25 @@ class MainWindow(QtWidgets.QMainWindow, Ui_MainWindow):
 
         self.listPartDimensions.setModel(self.model)
         list = self.model.stringList()
-        list.append(name + ": " + expected + ", " + min+" - "+max + "mm")
+        list.append(name + ": " + expected + ", " + min+" - "+max + "in")
         self.model.setStringList(list)
 
-    def createPopup(self, selectedItem):
-        if selectedItem =="Height + Width":
-            selectedItem = "Height"
-        popup = PopupDialog(self, windowTitle=str(selectedItem) + " Parameters")
+    def createPopup(self, dimension):
+
+        popup = PopupDialog(self, windowTitle=str(dimension.type) + " Parameters")
 
         if popup.exec():
             self.addSavedDimension(popup.var1, popup.var2, popup.var3, popup.var4)
-            contourLen = self.camera.contourDimensionLength
-            contourArea = self.camera.contourArea
-            dimension = DimensionDescriptor(selectedItem, popup.var1, popup.var2, popup.var3, popup.var4, contourLen,
-                                            contourArea)
+            #add the name, expected, min and max
+            dimension.name, dimension.expected, dimension.min, dimension.max = popup.var1, popup.var2, popup.var3, popup.var4
+
             self.partDescriptor.append(dimension)
             self.camera.partDescriptor = self.partDescriptor
             print(self.partDescriptor)
+
+            self.camera.measurementBuffers = {dimension.name: [] for dimension in
+                                       self.partDescriptor}  # Separate list for each dimension
+            self.camera.averageMeasurements = {dimension.name: None for dimension in self.partDescriptor}
             self.camera.cleanImage = self.camera.stillImage.copy()
         else:
             self.camera.stillImage = self.camera.cleanImage.copy()
